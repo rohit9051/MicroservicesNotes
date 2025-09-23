@@ -1,0 +1,368 @@
+1. Eureka Service Discovery And Registry
+	i) Eureka helps microservices find each other
+	ii) Microservices can register themselves in Eureka Server, so that other microservices application find them by their name not by their address url's
+	iii) Eureka Server should be annotated with @EnableEurekaServer with @SpringBootApplication and properties in app.properties
+		eureka.instance.hostname=localhost
+		eureka.client.register-with-eureka=false
+		eureka.client.fetch-registry=false
+		eureka.client.service-url.defaultZone=http://${eureka.instance.hostname}:${server.port}/eureka
+
+	iv) Service should use Eureka Service Discovery Dependency and register themselves, add annotation in main class @EnableDiscoveryClient and below in properties
+		eureka.client.service-url.defaultZone=http://localhost:7010/eureka
+
+2. Spring Cloud API Gateway
+	i) It has in built load balancer and distribute requests coming from client application equally to different instance of microservices
+	ii) It is the main door and can be used as a logging, validation (authentication & authorization) and routing
+	iii) To check the routing, the api gateway is also register to eureka and then the below configuration to be added in app.properties
+		spring.cloud.gateway.discovery.locator.enabled=true
+	     Let's suppose user microservice (name= user-ws) is also register to eureka, now gateway is running on port 8080 then the request will be like 
+		http://localhost:8080/USER-WS/ ---> then endpoints of user-ws, as we can user-ws in uppercase but urls are always in lower case then in that case below prop is need to added
+		spring.cloud.gateway.discovery.locator.lower-case-service-id=true
+
+	iv) Its not always the name we are giving in step 3 in URL, instead we can route with our custom name like below in properties:
+		spring.cloud.gateway.routes[0].id= users-status-check
+		spring.cloud.gateway.routes[0].uri= http://localhost:7011  (OR lb://user-ws --> here lb is load balancer and user-ws is the name of user service register in eureka)
+		spring.cloud.gateway.routes[0].predicates[0]= Path=/users-ws/users/status/check
+		spring.cloud.gateway.routes[0].predicates[1]= Method=GET
+		spring.cloud.gateway.routes[0].predicates[2]= Header=Authorization, Bearer (.*)
+		spring.cloud.gateway.routes[0].filters[0]=RemoveRequestHeader=Cookie
+		#spring.cloud.gateway.routes[0].filters[1]=RewritePath=/users-ws/users/status/check, /users/status/check
+		spring.cloud.gateway.routes[0].filters[1]=RewritePath=/users-ws/(?<segment>.*), /$\{segment}
+		spring.cloud.gateway.routes[0].filters[2]=AuthorizationHeaderFilter
+
+
+3.Spring cloud config server
+
+	i) Private Git Repository and alone spring boot application itself (Dependency -> Spring Cloud Config Server)
+	ii) Higher priority than local property file in application
+	iii) Mark main class with @EnableConfigServer
+	iv) Create Private Git repository-> Clone the git repository into local -> Create a Property file into the cloned repository (it will use as central configuration file)
+		for all microservices -> Add configuration for the config server in its application.properties file
+		spring.cloud.config.server.git.uri= https://github.com/rohit9051/PhotoApp
+		spring.cloud.config.server.git.default-label=main
+		spring.cloud.config.server.git.username=rohit9051
+		spring.cloud.config.server.git.passsword=iLmS_1234
+		spring.cloud.config.server.git.clone-on-start=true
+	v) Now for other microserices, add dependency of starter-config and create a bootstrap.properties( which is loaded before application.properties and beans are loaded)
+		The 2 properties need to add in bootstrap.properties
+		spring.cloud.config.uri= http://localhost:7014
+		spring.cloud.config.name=PhotoAppAPIConfigServer
+
+		And below in microservice application.properties
+		spring.config.import=configserver:http://localhost:7014
+	
+	Important -> vi) Now when there in new changes done in central config properties, then application not aware of that, so for that we need to add 2 dependency in config application
+				
+				a. spring-cloud-starter-bus-amqp b. spring-boot-starter-actuator 
+			
+			and below properties in config server for Rabbit MQ
+				
+				management.endpoints.web.exposure.include= bus-refresh
+				spring.rabbitmq.host= localhost
+				spring.rabbitmq.port=6572
+				spring.rabbitmq.username=guest
+				spring.rabbitmq.password=guest
+
+	vii) The microservices which are registered to config server also need to add spring-cloud-starter-bus-amqp dependency and in their application properties
+				spring.rabbitmq.host= localhost
+				spring.rabbitmq.port=6572
+				spring.rabbitmq.username=guest
+				spring.rabbitmq.password=guest
+
+	*** Now whenevenever there is change in central config app properties in git, the microservices will pick the latest value from config server, and it can be checked successful
+	    with API hit from postman to below URI : http://localhost:ConfigServer Port/actuator/busrefresh
+	
+	ix) Now, we can change git based central config to local machine file system based, for that we have to change config server app properties like below
+
+		spring.profiles.active= native,git (it will be git as well as local file system search)
+		spring.cloud.config.server.native.search-locations=file://${user.home}/Desktop/dev
+
+	***Its not good practice to hardcode username and password in properties file instead we can read from environment variables of local/AWS Secret Manager/Kubernetes Secrets
+	
+		
+4. Spring Boot Actuator
+	
+	i) Heath status of a microservice-> /health
+	ii) Display a complete list of Beans in microservice -> /beans
+Imp***	iii) Display HTTP exchange info (by default, the last 100 HTTP request-response exchanges) -> /httexchanges , and need to create a bean of HttpExchange in Configuration class
+	iv) Display a collated list of all @RequestMapping paths -> /mappings
+
+		management.endpoints.web.exposure.include= mappings,health
+	v) To enable it in the gateway level where can we see the routes of gateways we can add in gateway server property file
+		management.endpoints.gateway.enabled= true
+		management.endpoints.web.exposure.include= gateway,mappings,health
+
+5. Microservices Communications
+
+	i) Synchronous HTTP communication, Asynchronous communication over AMQP
+	ii) Using RestTemplate
+		a. Create a Bean of RestTemplate
+			@Bean
+			@LoadBalanced
+			public RestTemplate getRestTemplate()
+			{
+				return new RestTemplate();
+			}
+	
+		b. Inject RestTemplate in Service Class
+		c. Call to another microservice
+			String albumsUrl="http://ALBUMS-WS/users/"+userId+"/albums";
+
+		 	ResponseEntity<List<AlbumResponseModel>> albumListResponse= restTemplate.exchange(albumsUrl, HttpMethod.GET,null,   //here null can be Request Body/Headers
+				 new ParameterizedTypeReference<List<AlbumResponseModel>>() {});
+		 
+		 	List<AlbumResponseModel> albumList= albumListResponse.getBody();
+
+	iii) Using Feign (It is an Http Client, Declarative, Load Balanced)
+		a. Dependency -> spring-cloud-starter-openfeign
+		b. Add @EnableFeignClients to main Spring Boot Class
+		c. Create an interface and mark the interface to @FeignClient(name="ALBUMS-WS")  //name of the service which it wants to call/communicate or url address like http
+		d. Now the other service whatever the body inside the RequestMapping Method, only the implementation need to add in the interface
+			@GetMapping("/users/{id}/albums") --> Album Microservice endpoints
+			public List<AlbumResponseModel> getAlbums(@PathVariable String id);
+		e. Inject the interface in the service class and call Album Microservice
+		f. Lets assume if called service is not available/or incorrect URl passed for calling then it will throw FeignException, to handle we can surround code with try catch
+			or create global point for error handler like Global Exception Handler, for that we need to create a class which implements ErrorDecoder
+			@Component
+			public class FeignErrorDecoder implements ErrorDecoder
+			{
+				@Override
+				public Exception decode(String methodKey, Response response)  //here method key will be method name for calling service(in the interface)
+				{
+					switch(response.status()){
+					case 404: {
+							if(methodKey.contains("getAlbums"))
+							{
+								return new ResponseStatusException(HttpStatus.valueOf(response.status()), "Users albums are not found");
+							}
+							break;
+						}
+					default: return new Exception(response.reason());
+					}
+				return null;
+				}
+			}
+		
+		g. Now, if we want to log the calling process, what is sent/what is received and timing then the below things have to performed
+			a. add a property in calling service
+				logging.level.{complete package name where feign interface located}.{Feign Interface name itself} = DEBUG
+			b. Create a Bean of Looger.Level like below
+				@Bean
+				Logger.Level feignLoggerLover()
+				{
+					return Logger.Level.FULL;
+				}
+		
+6. Circuit Breaker using Resilience4j
+	
+	i) Core Modules of Resilience4J (Circuit Breaker, Rate Limiter, Retry, Bulkhead, TimeLimiter, Cache) -> These are when applied called Decorators Pattern
+	ii) Dependency needed is --> spring-cloud-starter-circuitbreaker-resilience4j, Actuator and AOP and add few properties in application.properties file
+		management.endpoints.web.exposure.include= *
+		management.endpoint.heath.enabled=true
+		management.endpoint.health.show-details= always
+		management.health.circuitbreaker.enabled= true
+
+		***Important endpoint of actuator for circuit breaker is /actuator/circuitbreakerevents -> which tells all the calls to other microservices (whether fails or success)
+	iii) In feign client interface:
+			@GetMapping("/users/{id}/albums") --> Album Microservice endpoints
+			@CircuitBreaker(name="album-ws", fallbackMethod="getAlbumFallback")
+			public List<AlbumResponseModel> getAlbums(@PathVariable String id);
+			
+			-----Fallback method-----
+			default List<AlbumResponseModel> getAlbumFallback(String id, Throwable exception)
+			{
+				S.O.P("Exception took place = "+ exception.getMessage());
+				return new ArrayList<>();
+			}
+	iv) Add Circuit Breaker config properties
+		resilience4j.circuitbreaker.instances.albums-ws.failure-rate-threshold = 50   //here album-ws is the name refers from the above step 3
+		resilience4j.circuitbreaker.instances.albums-ws.automatic-transition-from-open-to-half-open-enabled= true
+		resilience4j.circuitbreaker.instances.albums-ws.wait-duration-in-open-state=10000ms
+		resilience4j.circuitbreaker.instances.albums-ws.sliding-window-type=COUNT_BASED
+		resilience4j.circuitbreaker.instances.albums-ws.sliding-window-size=2
+		resilience4j.circuitbreaker.instances.albums-ws.minimum-number-of-calls=10
+
+	v) We can use @Retry annotation with @CircuitBreaker to retry calling the service, there is aspect order for code modules (Circuit Breaker will execute first then Retry),
+		To change the order we have to change in application.properties like below
+		resilience4j.circuitbreaker.circuit-breaker-aspect-order =1
+		resilience4j.retry.retry-aspect-order=2 (here 2 is higher priority than circuit breaker)
+		
+		----Code------
+		@Retry("album-ws")
+		@CircuitBreaker(name="album-ws", fallbackMethod="getAlbumFallback")
+		
+		Configuration for Retry in below:
+		resilience4j.retry.instances.albums-ws.max-attempts=3
+		resilience4j.retry.instances.albums-ws.wait-duration=5s
+		resilience4j.retry.instances.albums-ws.enable-exponential-backoff=true
+		resilience4j.retry.instances.albums-ws.exponential-backoff-multiplier=5
+
+
+7. Distributd Tracing
+	i) Using Micrometer/Zipkin
+	ii) Collects Http request method, response code, Endpoint URI or Exception Information And Mesaure Rate,Sum, Max, Percentiles --> feature of Micrometer
+	iii) Zipkin collect and display in nice User Interface
+	iv) Difference between trace id and span id -> trace id tell the complete flow while span id is unique for all the calls
+		
+		A ------------> B-------> C
+		Trace A, Span A		Trace A, Span B
+	v) Zipkin can be configured through Docker/ Stand alone application
+	vi) For Micrometer, need to add dependency in applications -> micrometer-observation, micrometer-tracing-bridge-brave, zipkin-reporter-brave
+	vii) Configurations to be done in microservices below in application.properties
+		management.tracing.sampling.probability=0.1 (Only 10% of tracing will be collected , max value to 1 for 100% tracing)
+	Imp****	logging.pattern.level= %5p [${Spring.application.name} , %X{traceId:-}, %X{spanId:-}]
+		
+		spring.zipkin.base-url=http://localhost:9411
+		spring.zipkin.sender.type=web
+		
+	viii) Service calling other services using feign so there will be tracing, for that we again need to add 1 more dependency that is -> feign-micrometer
+	ix) The step 8 is for if we are using feign client, there will be diffrenct for RestTemplate, based for that
+		a. Create a Bean of RestTemplate
+			@Bean
+			@LoadBalanced
+			public RestTemplate getRestTemplate(RestTemplateBuilder builder)
+			{
+				return builder.build();
+			}
+		
+		
+		Thats it, it is now configured for resttemplate
+		
+		However rember for both RestTemplate and Feign, we also need to configure one more property that is logging.level = DEBUG/INFO/As per we have configured
+
+
+8. Aggregating Logs (Using ELK -> Elasticsearch, Logstash and Kibana)
+	i) It is not possible for everyone to check log files of each individual microservices, however if there are aggregated this log files in one place and visual content
+	ii) Logstash will collect log files, filter and transform
+	iii) Elasticsearch will index and store the log files centrally from logstash
+	iv) Kibana is a visual tool
+	v) For each microservice, place file to local folder
+		logging.file= C:/logs/users-ws.log
+	vi) Download logstash and unzip it, now create a config file which will read log files and process to elasticsearch like below
+		a. simple-config.conf --> file name of below code
+		input{
+			file{
+				type=>"users-ws-log"
+				path=>"C:/logs/User Microservice/users-ws.log"
+				}
+			file{
+				type=>"albums-ws-log"
+				path=>"C:/logs/Album Microservice/albums-ws.log"
+				}
+			}
+		output{
+			if[type]=="users-ws-log"
+			{
+				elasticsearch { hosts=>["https://localhost:9200"]
+					       index=> "users-ws-%{+YYYY.MM.DD}"
+						user=> "elastic" ---------------------------------------for step d
+						password=>"password for elastic search" ----------------for step d
+						ssl_certificate_authorities=>["a path to http_ca.crt file] ------for step d
+					}
+			}
+			else if[type]=="albums-ws-log"
+			{
+				elasticsearch { hosts=>["https://localhost:9200"]
+					       index=> "albums-ws-%{+YYYY.MM.DD}"
+						user=> "elastic" ---------------------------------------for step d
+						password=>"password for elastic search" ----------------for step d
+						ssl_certificate_authorities=>["a path to http_ca.crt file] ------for step d
+					}
+			}
+
+			stdout{ codec=> rubydebug }
+		}
+	
+		b. Run this command in command prompt -> bin\logstash -f simple-config.conf
+		c. Download Elasticsearch and start elastic search with the command bin\elasticsearch.bat ,it will start bydefault on port 9200
+		d. Now elastic search start, configure logstash for username, password and security certificate
+		e. go to elasticsearch and you will see indexed log for album and user microservices under _Cat/indices, however its better to view the logs from kibana
+		f. Download Kibana, unzip and run using command bin\kibana\bat and configure the elastic search enrollment token
+		g. If enrollment token expired, we can generate new token again from elastic search
+		h. Kibana will ask for username and password which is same as elastic search( by default run of 5601 port)
+	
+9. Spring Profiles
+
+	i) For Bean creation or with Component, we can use @Profile annotation like below:
+		a. @Bean
+		   @Profile("production")
+		b. @Component
+		   @Profile("development")
+
+	------------To be continued
+
+10. Downstream Microservices and Method-level security
+	i) We have already added Spring Security to API Gateway, and now API gateway makes sure that certain web service endpoints can be called only if the Http request contains
+	   a valid JWT token in the authorization Header.
+
+	ii) However we are only validating the JWT token, but we are not checking if the user has the ability to access the endpoint or not.
+	iii) So our approach will be for the step 2:
+		Make API gateway forward Auth Header to downstream Microservices -> Extract userId/role/authority -> update security context of a microservice ->
+			and then use method-level security expressions to perform authorization at the method level by @PreAuthorize annotation
+
+	iv) Now downstream microservice should have similar to JWTFilter, a class AuthorizationFilter which extends BasicAuthenticationFilter should be created
+		public class AuthorizationFilter extends BasicAuthenticationFilter
+		{
+			protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
+			{
+				String authHeader= req.getHeader("Authorization");
+				if(authHeader!=null && authHeader.startsWith("Bearer")
+				{
+				String token= authHeader.subsString(7);
+				username= jwtUtil.extractUsername(token);
+				}
+				if(username!=null)
+				{
+					UsernamePasswordAuthenticationToken authToken= new UsernamePasswordAuthenticationToken(username,null,new ArrayList<>());
+					SecurityContextHolder.getContext().setAuthentication(authToken);
+						
+				}
+
+				chain.doFilter(req,res);
+			}
+		}
+	v) Now there is one more annotation which need to add to enable method level security that is @EnableMethodSecurity(prePostEnabled=true) // Pre and Post Authorization enabled
+		which should be added in Security Configuration File
+	vi) Uses of Pre and Post Authorize Annotations
+		a. @GetMapping("/{id}")
+		   @PreAuthorize("principal== #userId") or @PreAuthorize("hasRole('ADMIN')") or @PreAuthrize("has Authority('PROFILE_DELETE')") or we can combine all both of them with (or 																		keyword)
+		b. For @PostAuthorize, the method will be invoke first (not good for create, update, delete)
+		   @GetMapping("/{id}")
+		   @PostAuthorize("principal== returnObject.getBody().getUserId()")
+
+
+11. Role Based Access Control in Microservices
+	i) A role is a collection of authorities
+	ii) Method level security we can achieve by global authentication and local authorization
+	iii) But there is one con, we need code in every microservice to validate token for authorization for adding in security context
+	iv) Instead we can do by creating a separate project and add that project jar to downstream microservices and create methods like extract subject, roles/authorities and used it in
+		the step 10 point (iv), there we have extractusername/new ArrayList<>() which is authorities, we can get that from separate jar project
+	v) Now if there is communication between microservices like users-ws to album-ws, we are using feign client for that, and we can pass the jwt token in like:
+			@GetMapping("/users/{id}/albums") --> Album Microservice endpoints
+			public List<AlbumResponseModel> getAlbums(@PathVariable String id, @RequestHeader("Authorization") String authorization);
+
+		***fallback method should have the same method signature
+
+		Also in the controller level, request header @RequestHeader("Authorization") String authorization parameter should be added and it will then pass to getAlbums feign method.
+
+
+
+Q. How do you configure multiple databases in Spring Boot?
+Ans. Connecting to multiple databases in Spring Boot involves configuring multiple data sources and managing transactions appropriately.
+Define multiple DataSource beans in your configuration class.
+
+Use @Primary annotation to specify the default DataSource.
+
+Create separate EntityManagerFactory and TransactionManager for each database.
+
+Example: Use @Configuration to define beans for each DataSource.
+
+Utilize @EnableTransactionManagement for managing transactions across multiple databases.
+
+	
+
+	
+
+
+
+
