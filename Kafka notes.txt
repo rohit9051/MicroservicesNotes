@@ -200,7 +200,21 @@ Kafka
 			
 		**Avoid Duplication by-> Idempotent Consumer, Idempotent Producer , Transactions
 
-		i) Idempotent Producer-> Sending a unique key with the 
+		i) Idempotent Producer-> Sending a unique key with the help of ProducerRecord which contains key, value, topic name and most important message header
+
+			ProducerRecord<String,ProductCreatedEvent> record= new ProducerRecord<>("product-created-events-topic",productId,productCreatedEvent);
+			record.headers().add("messageId",UUID.randomUUID().toString().getBytes());  //messageId will be the header used in step ii below
+
+			kafkaTemplate.send(record);
+
+		ii) Consumer will consume the producer record like below for idempotency, i.e duplicate message cann't be processed again
+				@KafkaHandler
+				public void handle(ProductCreatedEvent productCreatedEvent, @Header("messageId") String messageId, @Header(KafkaHeaders.RECEIVED_KEY) String messageKey)
+				{
+					//if messageId present in db it will return from this method
+					//else it will process and save the data in database
+				}
+
 
 
 		
