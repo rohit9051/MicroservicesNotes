@@ -1,0 +1,214 @@
+Kafka
+
+1. Producer (Product Microservice)
+	i) Configuration for application properties:
+		spring.kafka.producer.bootstrap-servers= localhost:9092,localhost:9094
+		spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
+						//key will determine which partition the message will be stored in, if no key then round robin based message will be stored in topic
+		spring.kafka.producer.value-serializer=org.springframework.kafka.support.serializer.JsonSerializer
+	
+	ii) Create a new topic
+		a. Create a configuration class
+		b. Create a bean of NewTopic
+			@Bean
+			public NewTopic createTopic()
+			{
+			 return TopicBuilder.name("product-created-events-topic").partitions(3)
+					    .replicas(3)  //replicas means topics created on different brokers
+					    .configs(Map.of("min.insync.replicas","2"))   //write operation to be successful if minimum 2 replicas are up
+					    .build();
+			}
+	iii) There is this product controller class which will accept Product object and send to topic like below:
+		Product( String title, BigDecimal price, Integer quantity)
+	
+	iv) ProductCreatedEvent which will be send as a value to kafka topic which have below fields:
+		ProductCreatedEvent(UUID productId, String title, BigDecimal price, Integer quantity)
+	
+	v) Now:
+		@Autowired
+		public KafkaTemplate<String, ProductCreatedEvent) kafkaTemplate;
+	
+		CompletableFuture<SendResult<String,ProductCreatedEvent>> future = kafkaTemplate.send("product-created-events-topic", productId, productCreatedEvent);
+	
+		future.whenComplete((result,exception) ->
+			{
+				if(exception!=null)
+					log.error("Failed to send message "+ exception.getMessage());
+				else
+					log.info("Message send successfully "+result.getRecordMetaData());
+			}
+		});
+
+		//if want synchronous operation then future.join(); can be used after above whenComplete or like below with get() method
+		
+		SendResult<String,ProductCreatedEvent> result = kafkaTemplate.send("product-created-events-topic", productId, productCreatedEvent).get();
+
+
+	vi) Kafka Producer Acknowledgement and Retries:
+		To configure your kafka producer to wait for acknowledgement from brokers,
+		spring.kafka.producer.acks= all //waits for an acknowledgement from all brokers
+
+		spring.kafka.producer.acks= 1 //waits for an acknowledgement from a leader broker only
+
+		spring.kafka.producer.acks= 0 //does not wait for an acknowledgement
+
+				Message
+		Kafka Producer -----------------> Kafka Broker
+			       <----------------
+				Response
+	
+		a. No response: If the producer is configured with acks=0
+		b. Acknowledgement (ACK) of successful storage
+		c. Non-Retryable Error: A permanent problem that is unlikely to be resolved by retries
+		d. Retryable Error: A temporary problem that can be resolved by retrying the send operation
+
+		spring.kakfa.producer.retries= 10 //default value 2147483647
+		spring.kafka.producer.properties.retry.backoff.ms=1000  //how long the producer will wait before attempting to retry a failed request. Default value is 100ms
+
+		Instead of above 2 properties, we can use below property as recommended by Kafka Devs:
+		spring.kafka.producer.properties.delivery.timeout.ms=120000 //The maximum time Producer can spend trying to deliver the message. Default value is 2 minutes
+		spring.kafka.producer.properties.linger.ms=0 //Maximum time in ms that the producer will wait and buffer data before sending a batch of messages. Default val is 0
+		spring.kafka.producer.properties.request.timeout.ms=3000 //Maximum time to wait for a response from the broker after sending a single request. Default val is 30000 ms
+
+	vii) Idempotency is main thing in Kafka producer, as there can be possibility where topic will store duplicate message due to network issue, 
+		spring.kafka.producer.properties.enable.idempotence= true
+		spring.kafka.producer.properties.max.in.flight.requests.per.connection=5
+
+
+
+2. Kafka Consumer
+	i) Configuration for application properties:
+		spring.kafka.consumer.bootstrap-servers= localhost:9092,localhost:9094
+		spring.kafka.consumer.key-deserializer= org.apache.kafka.common.serialization.StringDeserializer
+		spring.kafka.consumer.value-deserializer= org.springframework.kafka.support.serializer.JsonDeserializer
+		spring.kafka.consumer.group-id= product-created-events
+
+	ii) A single kafka Consumer can consume messages from multiple topics like @KafkaListener(topics={"topic 1","topic 2}):
+		a. Consumtion of message from topic like 
+
+			@KafkaListener(topics="product-created-events-topic")
+			public void handle(ProductCreatedEvent productCreatedEvent)
+			{
+			}
+		b. @Component
+		   @KafkaListener(topics="product-created-events-topic")
+		   class ProductConsumer
+			{
+				@KafkaHandler  //It is used within a Kafka Listener class to define multiple  methods for handling different types of messages
+				public void handle(ProductCreatedEvent productCreatedEvent)
+				{
+				}
+			}
+	iii) A special type of configuration which is needed to interact with kafka clusters to receive messages and invoke your listener methods
+		@Bean
+		public ConcurrentKafkaListenerContainerFactory<?,?> kafkaListenerContainerFactory(ConcurrentKafkaListenerContainerFactoryConfigurer configurer,
+			ConsumerFactory<Object,Object> kafkaConsumerFactory)
+		{
+		ConcurrentKafkaListenerContainerFactory<Object,Object> factory= new ConcurrentKafkaListenerContainerFactory<>();
+		configurer.configure(factory, kafkaConsumerFactory);
+		//factory.setConsurrency(3)  //it will create 3 different instances of kafkaMessageListenerContainer
+		factory.setCommonErrorHandler(errorHandler());
+		factory.getContainerProperties().setAckMode(AckMode.MANUAL);
+		
+		return factory;
+		}
+
+	iv) Handle Errors in Kafka Consumer:
+		a. If there is de-serialization issue while consuming message like if String is send as a value instead of JSON, then there will be loop running everytime to consume that 			message resulting not able to read next message, to handle this:
+
+			@Bean
+			ConsumerFactory<String, Object> consumerFactory()
+			{
+				Map<String,Object> config= new HashMap<>();
+				config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+				config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+				config.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class);
+
+				return new DefaultKafkaConsumerFactory<>(config);
+			}
+
+		b. Now, provide error handler which will then publish the error message into Dead Letter Topic like below:
+
+			@Bean
+			public ConcurrentKafkaListenerContainerFactory<String,Object> kafkaListenerContainerFactory(ConsumerFactory<String,Object> consumerFactory
+			,kafkaTemplate<String,Object> kafkaTemplate)
+			{
+				ConcurrentKafkaListenerContainerFactory<String,Object> factory= new ConcurrentKafkaListenerContainerFactory<>();
+				
+				factory.setConsumerFactory(consumerFactory);
+
+				DefaultErrorHandler errorHandler= new DefaultErrorHandler(new DeadLetterPublishingRecoverer(kafkaTemplate));
+
+				factory.setCommonErrorHandler(errorHandler);
+				return factory;
+			}
+
+		c. Now our consumer will act as a producer to publish error message to DLT, so for that we need kafka producer factory bean and kafkaTemplate bean used in step 2:
+			
+			@Bean
+			ProducerFactory<String,Object> producerFactory()
+			{
+				Map<String,Object> config= new HashMap<>();
+				
+				//producer factory nothing but the configuration require for producer like bootstrap servers, key and value serializer classes
+
+	 			return new DefaultKafkaProducerFactory<>(config);
+			}
+				
+
+			@Bean
+			kafkaTemplate<String,Object> kafkaTemplate(ProducerFactory<String,Object> producerFactory)
+			{
+				return new kafkaTemplate<>(producerFactory);
+			}
+
+	
+	v) Exception Handling in Kafka Consumer and Retries:
+		a. If Exception is retryable then: Configure wait time and number of times to retry
+			
+			Create a NonRetryableException and RetryableException exception classes
+
+			Now throw them like while consuming message: like throw new NonRetryableException("An error took place. No need to consume this message again.");
+
+
+			DefaultErrorHandler errorHandler= new DefaultErrorHandler(new DeadLetterPublishingRecoverer(kafkaTemplate));
+			errorHandler.addNotRetryableExceptions(NonRetryableException.class);
+
+		
+		b. Retryable exception applied for third party api calls like below:
+			
+			try
+			{
+			ResponseEntity<String> response= responseEntity.exchange(url,HttpMethod.GET, null, String.class);
+			}
+
+			catch(Exception e)
+			{
+				throw new RetryableException(e);
+			}
+			
+			DefaultErrorHandler errorHandler= new DefaultErrorHandler(new DeadLetterPublishingRecoverer(kafkaTemplate), new FixedBackOff(5000,3));
+			errorHandler.addRetryableExceptions(RetryableException.class);
+
+
+3. Rebalancing: is a technique if there are number of instances increases having same consumer group then kafka automatically reassign partition. 
+		**Note: You can not start more consumers than the number of partitions in a topic.
+			Also, heart beats of conumers sent to kafka cluster(brokers) for their availability, if any consumer is down, the kafka again perform the rebalancing
+
+4. Idempotent Consumer: An idempotent consumer is a consumer that can process the same message multiple times without causing any side effects or data inconsistencies.
+			Message is process exactly only one time.
+			
+		**Avoid Duplication by-> Idempotent Consumer, Idempotent Producer , Transactions
+
+		i) Idempotent Producer-> Sending a unique key with the 
+
+
+		
+
+		
+
+	
+		
+			
+		
+
